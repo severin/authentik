@@ -1,9 +1,12 @@
 """captcha tests"""
 
+from http import HTTPStatus
+
 from django.urls import reverse
 from requests_mock import Mocker
 
 from authentik.core.tests.utils import create_test_admin_user, create_test_flow
+from authentik.events.logs import capture_logs
 from authentik.flows.markers import StageMarker
 from authentik.flows.models import FlowDesignation, FlowStageBinding
 from authentik.flows.planner import FlowPlan
@@ -215,3 +218,67 @@ class TestCaptchaStage(APIFlowTestCase):
             self.flow,
             js_url="https://test.goauthentik.io/test.js",
         )
+
+    @Mocker()
+    def test_upstream_failures_logged(self, mock: Mocker):
+        mock.post(
+            "https://www.recaptcha.net/recaptcha/api/siteverify",
+            json={
+                "success": False,
+                "error-codes": ["invalid-input-secret"],
+            },
+        )
+        plan = FlowPlan(flow_pk=self.flow.pk.hex, bindings=[self.binding], markers=[StageMarker()])
+        session = self.client.session
+        session[SESSION_KEY_PLAN] = plan
+        session.save()
+        with capture_logs() as logs:
+            response = self.client.post(
+                reverse("authentik_api:flow-executor", kwargs={"flow_slug": self.flow.slug}),
+                {"token": "PASSED"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertStageResponse(
+            response,
+            component="ak-stage-captcha",
+            response_errors={"token": [{"string": "Invalid captcha response", "code": "invalid"}]},
+        )
+
+        matching_logs = [
+            log
+            for log in logs
+            if log.event == "Failed to verify captcha token"
+            and log.log_level == "warning"
+        ]
+        self.assertEqual(len(matching_logs), 1)
+
+    @Mocker()
+    def test_upstream_errors_logged(self, mock: Mocker):
+        mock.post(
+            "https://www.recaptcha.net/recaptcha/api/siteverify",
+            status_code=HTTPStatus.BAD_GATEWAY,
+            text="Bad Gateway",
+        )
+        plan = FlowPlan(flow_pk=self.flow.pk.hex, bindings=[self.binding], markers=[StageMarker()])
+        session = self.client.session
+        session[SESSION_KEY_PLAN] = plan
+        session.save()
+        with capture_logs() as logs:
+            response = self.client.post(
+                reverse("authentik_api:flow-executor", kwargs={"flow_slug": self.flow.slug}),
+                {"token": "PASSED"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertStageResponse(
+            response,
+            component="ak-stage-captcha",
+            response_errors={"token": [{"string": "Failed to validate token", "code": "invalid"}]},
+        )
+
+        matching_logs = [
+            log
+            for log in logs
+            if log.event == "Exception while verifying captcha token"
+            and log.log_level == "warning"
+        ]
+        self.assertEqual(len(matching_logs), 1)

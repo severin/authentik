@@ -58,7 +58,11 @@ def verify_captcha_token(stage: CaptchaStage, token: str, remote_ip: str, key: s
         if stage.error_on_invalid_score:
             if not data.get("success", False):
                 error_codes = data.get("error-codes", ["unknown-error"])
-                LOGGER.warning("Failed to verify captcha token", error_codes=error_codes)
+                LOGGER.warning(
+                    "Failed to verify captcha token",
+                    error_codes=error_codes,
+                    stage=stage.name,
+                )
 
                 # These cases can usually be fixed by simply requesting a new token and retrying.
                 # [reCAPTCHA](https://developers.google.com/recaptcha/docs/verify#error_code_reference)
@@ -83,7 +87,13 @@ def verify_captcha_token(stage: CaptchaStage, token: str, remote_ip: str, key: s
                     raise ValidationError(_("Invalid captcha response"))
                 if stage.score_min_threshold > -1 and score < stage.score_min_threshold:
                     raise ValidationError(_("Invalid captcha response"))
-    except (RequestException, TypeError) as exc:
+    except (RequestException, TypeError, ValueError) as exc:
+        LOGGER.warning(
+            "Exception while verifying captcha token",
+            exc=exc,
+            stage=stage.name,
+            status_code=getattr(getattr(exc, "response", None), "status_code", None),
+        )
         raise ValidationError(_("Failed to validate token")) from exc
 
     return data
